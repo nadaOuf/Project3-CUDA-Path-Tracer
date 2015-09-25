@@ -16,6 +16,8 @@
 
 #define ERRORCHECK 1
 
+#define BLOCKSIZE 8
+
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
 void checkCUDAErrorFn(const char *msg, const char *file, int line) {
@@ -69,8 +71,13 @@ __global__ void sendImageToPBO(uchar4* pbo, glm::ivec2 resolution,
 
 static Scene *hst_scene = NULL;
 static glm::vec3 *dev_image = NULL;
-// TODO: static variables for device memory, scene/camera info, etc
-// ...
+
+//Device variables
+static Camera *dev_camera = NULL;
+static Geom *dev_scene_geom = NULL;
+static Material *dev_scene_material = NULL;
+static RayState *dev_ray_array = NULL;
+
 
 void pathtraceInit(Scene *scene) {
     hst_scene = scene;
@@ -79,14 +86,31 @@ void pathtraceInit(Scene *scene) {
 
     cudaMalloc(&dev_image, pixelcount * sizeof(glm::vec3));
     cudaMemset(dev_image, 0, pixelcount * sizeof(glm::vec3));
-    // TODO: initialize the above static variables added above
+    
+	cudaMalloc(&dev_camera, sizeof(Camera));
+	cudaMemcpy(dev_camera, &cam, sizeof(Camera), cudaMemcpyHostToDevice);
+	checkCUDAError("Problem with camera memcpy");
+
+	cudaMalloc(&dev_scene_geom, hst_scene->geoms.size() * sizeof(Geom));
+	cudaMemcpy(dev_scene_geom, hst_scene->geoms.data(), hst_scene->geoms.size() * sizeof(Geom), cudaMemcpyHostToDevice);
+	checkCUDAError("Problem with scene geometry memcpy");
+
+	cudaMalloc(&dev_scene_material, hst_scene->materials.size() * sizeof(Material));
+	cudaMemcpy(dev_scene_material, hst_scene->materials.data(), hst_scene->materials.size() * sizeof(Material), cudaMemcpyHostToDevice);
+	checkCUDAError("Problem with scene material memcpy");
+
+	cudaMalloc(&dev_ray_array, pixelcount * sizeof(RayState));
 
     checkCUDAError("pathtraceInit");
 }
 
 void pathtraceFree() {
     cudaFree(dev_image);  // no-op if dev_image is null
-    // TODO: clean up the above static variables
+   
+   cudaFree(dev_camera);
+   cudaFree(dev_scene_geom);
+   cudaFree(dev_scene_material);
+   cudaFree(dev_ray_array);
 
     checkCUDAError("pathtraceFree");
 }
@@ -117,6 +141,90 @@ __global__ void generateNoiseDeleteMe(Camera cam, int iter, glm::vec3 *image) {
 }
 
 /**
+* Generate gittered ray within pixel from camera to the scene
+*/
+__global__ void generateFirstLevelRays(Camera* cam, RayState* rays) {
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+	
+	 if (x < cam->resolution.x && y < cam->resolution.y) {
+		int index = x + (y * cam->resolution.x);
+	
+		//Set the ray start position which is the camera position
+		rays[index].ray.origin = cam->position;
+
+		//Set the ray direction
+		// 1. Get the pixel position in the world coordinates
+		glm::vec3 pixelWorld = cam->mPosition + (cam->hVector * ((2.0f * (x*1.0f/(cam->resolution.x - 1.0f)) ) - 1) ) + (cam->vVector * (1 - (2.0f * (y*1.0f/(cam->resolution.y - 1.0f))) ) );
+		
+		// 2. Get the normalized ray direction from the ray origin (camera position) to the pixel world coordinates
+		rays[index].ray.direction = glm::normalize(pixelWorld - cam->position);
+
+		//Set the color carried by the ray to white
+		rays[index].color = glm::vec3(1.0f, 1.0f, 1.0f);
+
+		//Set the ray as alive
+		rays[index].isTerminated = false;
+
+	}
+
+}
+
+
+/**
+*
+*/
+__global__ void pathIteration(int iter, RayState *rays, Camera *cam, Geom *geom, Material *mat, int geomCount, glm::vec3 *image) {
+	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
+    int y = (blockIdx.y * blockDim.y) + threadIdx.y;
+	
+	if (x < cam->resolution.x && y < cam->resolution.y) {
+		int index = x + (y * cam->resolution.x);
+		
+		if(!rays[index].isTerminated) {
+			int intersectionT = -1;
+			int materialIndex = 0;
+			glm::vec3 intersectionPoint, intersectionNormal;
+			for(int i = 0; i < geomCount; ++i) {
+				glm::vec3 currentIntersectionPoint, currentNormal;
+				bool outside = false;
+
+				int t = -1;
+				if(geom[i].type == GeomType::SPHERE) {
+					t = sphereIntersectionTest(geom[i], rays[index].ray, currentIntersectionPoint, currentNormal, outside);
+				} else if(geom[i].type == GeomType::CUBE) {
+					t = boxIntersectionTest(geom[i], rays[index].ray, currentIntersectionPoint, currentNormal, outside);
+				}
+
+				if(t > 0 && (t < intersectionT || intersectionT < 0)) {
+					materialIndex = geom[i].materialid;
+					intersectionT = t;
+					intersectionPoint = currentIntersectionPoint;
+					intersectionNormal = currentNormal;
+				}
+			}
+
+			if(intersectionT > 0) {
+				thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
+
+				scatterRay(rays[index].ray, image[index], intersectionPoint, intersectionNormal, mat[materialIndex], rng);
+			
+				//Check if the geometry hit is a light source, set it as dead
+				if(mat[materialIndex].emittance > 0) {
+					rays[index].isTerminated = true;
+				}
+
+			} else {
+				//The ray didn't intersect with anything, set it as dead
+				rays[index].isTerminated = true;
+			}
+		}
+	}
+	
+	
+}
+
+/**
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
  * of memory management
  */
@@ -125,7 +233,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
     const Camera &cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
 
-    const dim3 blockSize2d(8, 8);
+    const dim3 blockSize2d(BLOCKSIZE, BLOCKSIZE);
     const dim3 blocksPerGrid2d(
             (cam.resolution.x + blockSize2d.x - 1) / blockSize2d.x,
             (cam.resolution.y + blockSize2d.y - 1) / blockSize2d.y);
@@ -157,18 +265,25 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
     // * Finally, handle all of the paths that still haven't terminated.
     //   (Easy way is to make them black or background-colored.)
 
-    // TODO: perform one iteration of path tracing
+    //Generate all first level rays and save them 
+	generateFirstLevelRays<<<blocksPerGrid2d, blockSize2d>>>(dev_camera, dev_ray_array);
 
-    generateNoiseDeleteMe<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, dev_image);
-
-    ///////////////////////////////////////////////////////////////////////////
+	//Create a for loop that iterates over the desired depth
+	//For each loop iteration 
+	// * determine the number of threads and thus blocks needed
+	// * call the pathtrace kernel for each ray
+	// * do stream compaction to get rid of all the terminated rays and get the remaining number of rays!
+	pathIteration<<<blocksPerGrid2d, blockSize2d>>>(iter, dev_ray_array, dev_camera, dev_scene_geom, dev_scene_material, hst_scene->geoms.size(), dev_image);
+	checkCUDAError("path iteration");
+    
+	///////////////////////////////////////////////////////////////////////////
 
     // Send results to OpenGL buffer for rendering
     sendImageToPBO<<<blocksPerGrid2d, blockSize2d>>>(pbo, cam.resolution, iter, dev_image);
+	checkCUDAError("send to PBO");
 
     // Retrieve image from GPU
     cudaMemcpy(hst_scene->state.image.data(), dev_image,
             pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
-
-    checkCUDAError("pathtrace");
+    checkCUDAError("memcpy image data");
 }

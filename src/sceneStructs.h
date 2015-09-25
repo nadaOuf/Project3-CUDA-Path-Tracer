@@ -15,6 +15,13 @@ struct Ray {
     glm::vec3 direction;
 };
 
+struct RayState {
+	Ray ray;
+	glm::vec3 color;
+	bool isTerminated;
+};
+
+
 struct Geom {
     enum GeomType type;
     int materialid;
@@ -43,7 +50,11 @@ struct Camera {
     glm::vec3 position;
     glm::vec3 view;
     glm::vec3 up;
-    glm::vec2 fov;
+	glm::vec2 fov;
+
+	glm::vec3 hVector;
+	glm::vec3 vVector;
+	glm::vec3 mPosition;
 };
 
 struct RenderState {

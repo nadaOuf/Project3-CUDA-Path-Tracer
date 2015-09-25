@@ -80,6 +80,19 @@ void runCuda() {
         cam.view = glm::vec3(rotmat * glm::vec4(v, 0.f));
         cam.up = glm::vec3(rotmat * glm::vec4(u, 0.f));
         cam.position += cammove.x * r + cammove.y * u + cammove.z * v;
+
+		//Write a function please!!
+		//Set the position of the camera origin in the image plane (m positon)
+		cam.mPosition = cam.position + v;
+		
+		//Calculate the v and h vectors in the image plane
+		glm::vec3 aVector = r;
+		glm::vec3 bVector = glm::normalize(glm::cross(aVector, v));
+		aVector = glm::normalize(aVector);
+
+		cam.hVector = aVector * glm::length(v) *atan(glm::radians(cam.fov.x));
+		cam.vVector = bVector * glm::length(v) *atan(glm::radians(cam.fov.y));
+
         theta = phi = 0;
         cammove = glm::vec3();
         camchanged = false;

@@ -75,4 +75,11 @@ void scatterRay(
     // TODO: implement this.
     // A basic implementation of pure-diffuse shading will just call the
     // calculateRandomDirectionInHemisphere defined above.
+
+	ray.origin = intersect + 1e-3f; 
+	ray.direction = calculateRandomDirectionInHemisphere(normal, rng);
+
+	color += m.color;
+	
+
 }

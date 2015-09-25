@@ -135,10 +135,24 @@ int Scene::loadCamera() {
     float fovx = (atan(xscaled) * 180) / PI;
     camera.fov = glm::vec2(fovx, fovy);
 
+	//Set the position of the camera origin in the image plane (m positon)
+	camera.mPosition = camera.position + camera.view;
+
+	//Calculate the v and h vectors in the image plane
+	glm::vec3 aVector = glm::cross(camera.view, camera.up);
+	glm::vec3 bVector = glm::normalize(glm::cross(aVector, camera.view));
+	aVector = glm::normalize(aVector);
+
+	camera.hVector = aVector * glm::length(camera.view) *atan(glm::radians(camera.fov.x));
+	camera.vVector = bVector * glm::length(camera.view) *atan(glm::radians(camera.fov.y));
+
+
     //set up render camera stuff
     int arraylen = camera.resolution.x * camera.resolution.y;
     state.image.resize(arraylen);
     std::fill(state.image.begin(), state.image.end(), glm::vec3());
+
+
 
     cout << "Loaded camera!" << endl;
     return 1;
