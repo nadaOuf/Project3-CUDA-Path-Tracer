@@ -42,7 +42,7 @@ void checkCUDAErrorFn(const char *msg, const char *file, int line) {
 
 __host__ __device__
 thrust::default_random_engine makeSeededRandomEngine(int iter, int index, int depth) {
-    int h = utilhash((1 << 31) | (depth << 22) | iter) ^ utilhash(index);
+	int h = utilhash((1 << 31) | (depth << 22) | iter) ^ utilhash(index);
     return thrust::default_random_engine(h);
 }
 
@@ -174,7 +174,7 @@ __global__ void generateFirstLevelRays(Camera* cam, RayState* rays) {
 /**
 *
 */
-__global__ void pathIteration(int iter, RayState *rays, Camera *cam, Geom *geom, Material *mat, int geomCount, glm::vec3 *image) {
+__global__ void pathIteration(int iter, int depth, RayState *rays, Camera *cam, Geom *geom, Material *mat, int geomCount, glm::vec3 *image) {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 	
@@ -205,19 +205,23 @@ __global__ void pathIteration(int iter, RayState *rays, Camera *cam, Geom *geom,
 			}
 
 			if(intersectionT > 0) {
-				thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
+				thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, depth);
 
-				scatterRay(rays[index].ray, image[index], intersectionPoint, intersectionNormal, mat[materialIndex], rng);
+				scatterRay(rays[index].ray, rays[index].color, intersectionPoint, intersectionNormal, mat[materialIndex], rng);
 			
 				//Check if the geometry hit is a light source, set it as dead
 				if(mat[materialIndex].emittance > 0) {
+					image[index] += (rays[index].color/(1.0f*depth));
 					rays[index].isTerminated = true;
 				}
 
 			} else {
 				//The ray didn't intersect with anything, set it as dead
+				image[index] += glm::vec3(0.0f);
 				rays[index].isTerminated = true;
 			}
+			
+			
 		}
 	}
 	
@@ -273,8 +277,10 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
 	// * determine the number of threads and thus blocks needed
 	// * call the pathtrace kernel for each ray
 	// * do stream compaction to get rid of all the terminated rays and get the remaining number of rays!
-	pathIteration<<<blocksPerGrid2d, blockSize2d>>>(iter, dev_ray_array, dev_camera, dev_scene_geom, dev_scene_material, hst_scene->geoms.size(), dev_image);
-	checkCUDAError("path iteration");
+	for(int i = 0; i < traceDepth; ++i)	{
+		pathIteration<<<blocksPerGrid2d, blockSize2d>>>(iter, i, dev_ray_array, dev_camera, dev_scene_geom, dev_scene_material, hst_scene->geoms.size(), dev_image);
+		checkCUDAError("path iteration");
+	}
     
 	///////////////////////////////////////////////////////////////////////////
 
