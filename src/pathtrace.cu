@@ -75,6 +75,7 @@ static glm::vec3 *dev_image = NULL;
 //Device variables
 static Camera *dev_camera = NULL;
 static Geom *dev_scene_geom = NULL;
+static Geom *dev_scene_lights = NULL;
 static Material *dev_scene_material = NULL;
 static RayState *dev_ray_array = NULL;
 
@@ -94,6 +95,10 @@ void pathtraceInit(Scene *scene) {
 	cudaMalloc(&dev_scene_geom, hst_scene->geoms.size() * sizeof(Geom));
 	cudaMemcpy(dev_scene_geom, hst_scene->geoms.data(), hst_scene->geoms.size() * sizeof(Geom), cudaMemcpyHostToDevice);
 	checkCUDAError("Problem with scene geometry memcpy");
+
+	cudaMalloc(&dev_scene_lights, hst_scene->lights.size() * sizeof(Geom));
+	cudaMemcpy(dev_scene_lights, hst_scene->lights.data(), hst_scene->lights.size() * sizeof(Geom), cudaMemcpyHostToDevice);
+	checkCUDAError("Problem with scene lights memcpy");
 
 	cudaMalloc(&dev_scene_material, hst_scene->materials.size() * sizeof(Material));
 	cudaMemcpy(dev_scene_material, hst_scene->materials.data(), hst_scene->materials.size() * sizeof(Material), cudaMemcpyHostToDevice);
@@ -174,7 +179,7 @@ __global__ void generateFirstLevelRays(Camera* cam, RayState* rays) {
 /**
 *
 */
-__global__ void pathIteration(int iter, int depth, RayState *rays, Camera *cam, Geom *geom, Material *mat, int geomCount, glm::vec3 *image) {
+__global__ void pathIteration(int iter, int depth, RayState *rays, Camera *cam, Geom *geom, Geom *lights, Material *mat, int geomCount, glm::vec3 *image) {
 	int x = (blockIdx.x * blockDim.x) + threadIdx.x;
     int y = (blockIdx.y * blockDim.y) + threadIdx.y;
 	
@@ -184,6 +189,7 @@ __global__ void pathIteration(int iter, int depth, RayState *rays, Camera *cam, 
 		if(!rays[index].isTerminated) {
 			int intersectionT = -1;
 			int materialIndex = 0;
+			int geomIndex = 0;
 			glm::vec3 intersectionPoint, intersectionNormal;
 			for(int i = 0; i < geomCount; ++i) {
 				glm::vec3 currentIntersectionPoint, currentNormal;
@@ -198,6 +204,7 @@ __global__ void pathIteration(int iter, int depth, RayState *rays, Camera *cam, 
 
 				if(t > 0 && (t < intersectionT || intersectionT < 0)) {
 					materialIndex = geom[i].materialid;
+					geomIndex = i;
 					intersectionT = t;
 					intersectionPoint = currentIntersectionPoint;
 					intersectionNormal = currentNormal;
@@ -205,23 +212,46 @@ __global__ void pathIteration(int iter, int depth, RayState *rays, Camera *cam, 
 			}
 
 			if(intersectionT > 0) {
-				thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, depth);
+				
+				if(mat[materialIndex].hasRefractive) {
+					
+					//Get the refracted ray
+					rays[index].ray.direction = glm::normalize(glm::refract(rays[index].ray.direction, intersectionNormal, 1.0f/mat[materialIndex].indexOfRefraction));
+					rays[index].ray.origin = intersectionPoint + (1e-3f * rays[index].ray.direction);
 
-				scatterRay(rays[index].ray, rays[index].color, intersectionPoint, intersectionNormal, mat[materialIndex], rng);
-			
-				//Check if the geometry hit is a light source, set it as dead
-				if(mat[materialIndex].emittance > 0) {
-					image[index] += (rays[index].color/(1.0f*depth));
-					rays[index].isTerminated = true;
+					//Intersect again
+					bool outside = true;
+					if(geom[geomIndex].type == GeomType::SPHERE) {
+						intersectionT = sphereIntersectionTest(geom[geomIndex], rays[index].ray, intersectionPoint, intersectionNormal, outside);
+					} else if(geom[geomIndex].type == GeomType::CUBE) {
+						intersectionT = boxIntersectionTest(geom[geomIndex], rays[index].ray, intersectionPoint, intersectionNormal, outside);
+					}
+
+					//Get the outgoing refracted ray
+					rays[index].ray.direction = glm::normalize(glm::refract(rays[index].ray.direction, intersectionNormal, mat[materialIndex].indexOfRefraction));
+					rays[index].ray.origin = intersectionPoint + (1e-3f * rays[index].ray.direction);
+
+					//Multiply by the diffuse color
+					rays[index].color *= mat[materialIndex].color;
+					
+				} else {				
+					thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, depth);
+					scatterRay(rays[index].ray, rays[index].color, intersectionPoint, intersectionNormal, mat[materialIndex], lights, cam->position, rng);
+					
+					//Check if the geometry hit is a light source, set it as dead
+					if(mat[materialIndex].emittance > 0) {
+						rays[index].isTerminated = true;
+					}
 				}
+				
 
 			} else {
 				//The ray didn't intersect with anything, set it as dead
-				image[index] += glm::vec3(0.0f);
+				rays[index].color = glm::vec3(0.0f);
 				rays[index].isTerminated = true;
 			}
-			
-			
+		} else {
+			image[index] += rays[index].color/(1.0f*depth);
 		}
 	}
 	
@@ -278,7 +308,7 @@ void pathtrace(uchar4 *pbo, int frame, int iter) {
 	// * call the pathtrace kernel for each ray
 	// * do stream compaction to get rid of all the terminated rays and get the remaining number of rays!
 	for(int i = 0; i < traceDepth; ++i)	{
-		pathIteration<<<blocksPerGrid2d, blockSize2d>>>(iter, i, dev_ray_array, dev_camera, dev_scene_geom, dev_scene_material, hst_scene->geoms.size(), dev_image);
+		pathIteration<<<blocksPerGrid2d, blockSize2d>>>(iter, i, dev_ray_array, dev_camera, dev_scene_geom, dev_scene_lights, dev_scene_material, hst_scene->geoms.size(), dev_image);
 		checkCUDAError("path iteration");
 	}
     

@@ -138,6 +138,8 @@ void scatterRay(
         glm::vec3 intersect,
         glm::vec3 normal,
         const Material &m,
+		const Geom* lights,
+		glm::vec3 cameraPosition,
         thrust::default_random_engine &rng) {
     // TODO: implement this.
     // A basic implementation of pure-diffuse shading will just call the
@@ -151,15 +153,31 @@ void scatterRay(
 
 	thrust::uniform_real_distribution<float> u01(0, 1);
 	float probabilityRelfective = u01(rng);
-
-	ray.origin = intersect + 1e-3f; //to avoid self-intersection
+	glm::vec3 viewDirection = glm::normalize(cameraPosition - intersect);
 	
 	//Check if reflective
-
-	//Check if refractive 
-
-	ray.direction = calculateRandomDirectionInHemisphere(normal, rng);
-	color *= m.color;
+	if (m.hasReflective) {
+		ray.direction = glm::reflect(ray.direction, normal);
+		ray.origin = intersect - 1.0f *ray.direction;
+		color *= m.color;
+		return;
+	}
+	
+	if (m.specular.exponent > 0 && probabilityRelfective < 0.05f) {
+		
+		//Perfect specular reflection to get more accurate one sample a sphere and then get the new direction
+		ray.direction = glm::normalize(glm::reflect(ray.direction, normal));
+		ray.origin = intersect + 1e-3f *ray.direction;
+		//sample the light! to get the correct intensity
+			
+		color *= m.specular.color;
+	}
+	else {
+		ray.direction = glm::normalize(calculateRandomDirectionInHemisphere(normal, rng));
+		ray.origin = intersect + 1e-3f *ray.direction;
+		color *= m.color;
+	}
+	
 	
 
 }
